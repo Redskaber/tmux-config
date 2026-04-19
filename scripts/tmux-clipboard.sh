@@ -1,5 +1,5 @@
-#!/bin/sh
-# @path: ~/.config/tmux/tmux-clipboard.sh
+#!/bin/bash
+# @path: ~/.config/tmux/scripts/tmux-clipboard.sh
 # @anthor: redskaber
 # @datetime: 2026-01-27
 # @description: handle tmux copy
