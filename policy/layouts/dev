@@ -1,0 +1,25 @@
+# @layout: dev
+# @author: redskaber
+# @description: Full-stack development — editor + terminal + logs
+# @panes: 3
+# @tags: development, coding, fullstack
+
+LAYOUT_NAME="dev"
+LAYOUT_DESC="Editor | Terminal | Logs"
+LAYOUT_PANES=3
+
+layout_apply() {
+  local session="$1"
+  local window="$2"
+
+  # Pane 1: main editor (left, 60%)
+  tmux select-pane -t "${session}:${window}.1"
+
+  # Pane 2: terminal (right-top)
+  tmux split-window -h -p 40 -t "${session}:${window}.1"
+
+  # Pane 3: logs (right-bottom)
+  tmux split-window -v -p 40 -t "${session}:${window}.2"
+
+  tmux select-pane -t "${session}:${window}.1"
+}

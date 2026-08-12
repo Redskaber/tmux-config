@@ -1,0 +1,22 @@
+# @layout: git
+# @author: redskaber
+# @description: Git workflow — diff viewer + commit log + shell
+# @panes: 3
+# @tags: git, vcs, review
+
+LAYOUT_NAME="git"
+LAYOUT_DESC="Diff | Log | Shell"
+LAYOUT_PANES=3
+
+layout_apply() {
+  local session="$1"
+  local window="$2"
+
+  # Main diff pane (top, 65%)
+  tmux split-window -v -p 35 -t "${session}:${window}.1"
+
+  # Bottom: log + shell side by side
+  tmux split-window -h -p 50 -t "${session}:${window}.2"
+
+  tmux select-pane -t "${session}:${window}.1"
+}

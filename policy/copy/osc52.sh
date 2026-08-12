@@ -1,7 +1,6 @@
 #!/bin/bash
 # @path: ~/.config/tmux/policy/copy/osc52.sh
-# @anthor: redskaber
-# @datetime: 2026-04-19
-# @description: handle osc52
+# @author: redskaber
+# @description: OSC 52 clipboard backend (works over SSH)
 
 base64 | tr -d '\n' | sed 's/.*/\e]52;c;&\a/'

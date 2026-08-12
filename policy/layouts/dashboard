@@ -1,0 +1,20 @@
+# @layout: dashboard
+# @author: redskaber
+# @description: 2x2 dashboard grid — four equal panes
+# @panes: 4
+# @tags: dashboard, grid, overview
+
+LAYOUT_NAME="dashboard"
+LAYOUT_DESC="2x2 Grid Dashboard"
+LAYOUT_PANES=4
+
+layout_apply() {
+  local session="$1"
+  local window="$2"
+
+  tmux split-window -h -p 50 -t "${session}:${window}.1"
+  tmux split-window -v -p 50 -t "${session}:${window}.1"
+  tmux split-window -v -p 50 -t "${session}:${window}.2"
+
+  tmux select-pane -t "${session}:${window}.1"
+}

@@ -1,0 +1,24 @@
+# @layout: writing
+# @author: redskaber
+# @description: Focused writing — single wide pane, minimal distraction
+# @panes: 1
+# @tags: writing, focus, minimal
+
+LAYOUT_NAME="writing"
+LAYOUT_DESC="Single Focus Pane"
+LAYOUT_PANES=1
+
+layout_apply() {
+  local session="$1"
+  local window="$2"
+
+  # Kill all extra panes, keep only the first.
+  local pane_count
+  pane_count=$(tmux list-panes -t "${session}:${window}" 2>/dev/null | wc -l)
+  while [ "$pane_count" -gt 1 ]; do
+    tmux kill-pane -t "${session}:${window}.2" 2>/dev/null || break
+    pane_count=$(tmux list-panes -t "${session}:${window}" 2>/dev/null | wc -l)
+  done
+
+  tmux select-pane -t "${session}:${window}.1"
+}

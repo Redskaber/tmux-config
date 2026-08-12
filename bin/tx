@@ -1,0 +1,678 @@
+#!/usr/bin/env bash
+# @file: bin/tx
+# @author: redskaber
+# @desc: tmux window-organization manager — snapshot · group · name · query ·
+#        select · store · remove · restore. The user-facing command router.
+# @arch: CLI Layer — sources lib/*.sh and dispatches subcommands.
+# @deps: bash 4.4+, tmux 3.x, jq, fzf (interactive)
+# @usage: tx [--help] [--version] <command> [args...]
+
+set -euo pipefail
+
+# ============================================================
+# === Bootstrap: resolve home, source libs                ===
+# ============================================================
+
+# Resolve absolute path to this script (following symlinks) — used as a hint.
+_TX_SELF="$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "${BASH_SOURCE[0]:-$0}")"
+_TX_SELF_DIR="$(cd "$(dirname "$_TX_SELF")" 2>/dev/null && pwd)"
+
+# Prefer an explicit TX_HOME; else derive from this binary's location.
+if [[ -z "${TX_HOME:-}" || ! -f "${TX_HOME:-}/lib/core.sh" ]]; then
+  if [[ -f "$_TX_SELF_DIR/../lib/core.sh" ]]; then
+    TX_HOME="$(cd "$_TX_SELF_DIR/.." && pwd)"
+  else
+    TX_HOME="$_TX_SELF_DIR"
+  fi
+fi
+export TX_HOME
+export TX_BIN="$_TX_SELF"
+
+# Ensure tx is findable by subprocesses (popups, run-shell) even if not on PATH.
+# tmux's run-shell / display-popup inherit tmux's environment, which may NOT
+# include ~/.local/bin. Prepending TX_HOME/bin makes `tx` callable everywhere.
+case ":${PATH:-}:" in
+  *":$TX_HOME/bin:"*) ;;
+  *) PATH="$TX_HOME/bin:$PATH"; export PATH ;;
+esac
+
+# shellcheck source=../lib/core.sh
+source "$TX_HOME/lib/core.sh"
+# shellcheck source=../lib/snapshot.sh
+source "$TX_HOME/lib/snapshot.sh"
+# shellcheck source=../lib/store.sh
+source "$TX_HOME/lib/store.sh"
+# shellcheck source=../lib/group.sh
+source "$TX_HOME/lib/group.sh"
+# shellcheck source=../lib/ui.sh
+source "$TX_HOME/lib/ui.sh"
+
+# ============================================================
+# === Usage                                                ===
+# ============================================================
+
+tx_usage() {
+  cat <<'EOF'
+tx — tmux window-organization manager (v1.1.0)
+
+USAGE
+  tx [command] [options]
+
+COMMANDS
+  (default)                  interactive picker → load a snapshot
+  start   [NAME] [-r]        START tmux + pick/restore a snapshot (ergonomic entry)
+                             — outside tmux: bootstraps a server then restores
+                             — inside tmux:  picker → switch client
+  save    [NAME] [-g -t -d -a -s -f -y]   snapshot current session(s)
+  load    <NAME|ID> [-r -a -c -k]         restore a snapshot
+  last    [-r] [-n N]                     restore or list N most-recent snapshots
+  ls      [-g -t -n --sort --json]        list / filter snapshots
+  rm      <NAME|ID…> [-f] | -g GROUP      remove snapshot(s)
+  group   <ls|add|rm|mv|show> [args]      manage groups
+  rename  <OLD> <NEW>                     rename a snapshot
+  tag     <NAME|ID> [+t1,-t2 …]           add/remove tags
+  show    <NAME|ID>                       show snapshot details (tree)
+  diff    <A> <B>                         structural diff of two snapshots
+  edit    <NAME|ID>                       edit snapshot JSON in $EDITOR
+  index   <rebuild|check>                 manage the query index
+  doctor                            diagnose environment
+  info                              system & store info
+
+OPTIONS
+  -y, --yes              skip confirmations
+  -f, --force            overwrite / force
+  -a, --all              operate on all sessions (save)
+  -s, --session NAME     scope to a specific session (save)
+  -g, --group GROUP      specify group
+  -t, --tags T1,T2       tags (comma-separated)
+  -d, --desc TEXT        description
+  -r, --replace          replace existing session on load
+  -c, --commands         re-run captured commands on restore
+  -k, --keep-cwd         ignore stored cwd on restore
+      --attach           attach / switch-client after restore
+      --json             machine-readable output
+      --color WHEN       auto|never|force
+      --log-level L      debug|info|warn|error
+  -h, --help             show this help
+  -v, --version          show version
+
+EXAMPLES
+  tx start                  # outside tmux → bootstrap + pick a snapshot
+  tx start myproj           # outside tmux → bootstrap + restore myproj
+  tx save myproj -g work -t frontend,nextjs -d "morning setup"
+  tx                        # inside tmux → pick & load interactively
+  tx load myproj --replace --attach
+  tx last                   # restore the most-recent snapshot
+  tx last -n 5              # list the 5 most-recent (no restore)
+  tx ls -g work --sort name
+  tx rm old-snap -f
+  tx tag myproj +urgent,-wip
+  tx group add personal
+  tx diff a1b2c3 myproj
+
+ENV
+  TX_STORE_DIR   override data directory (default: ~/.local/share/tx)
+  TX_HOME        override engine root (default: dir of bin/tx)
+  TX_COLOR       color mode (auto|never|force)
+  TX_LOG_LEVEL   log verbosity (default: info)
+  TX_RESTORE_COMMANDS  default for --commands (0|1)
+EOF
+}
+
+# ============================================================
+# === Command: save                                        ===
+# ============================================================
+
+cmd_save() {
+  local name="" group="" tags="" desc="" scope="current" force=0 yes=0
+  local positional=()
+  while (( $# > 0 )); do
+    case "$1" in
+      -g|--group) group="$2"; shift 2 ;;
+      -t|--tags)  tags="$2"; shift 2 ;;
+      -d|--desc)  desc="$2"; shift 2 ;;
+      -a|--all)   scope="all"; shift ;;
+      -s|--session) scope="$2"; shift 2 ;;
+      -f|--force) force=1; shift ;;
+      -y|--yes)   yes=1; shift ;;
+      -h|--help) sed -n '/^  save/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      --) shift; while (( $# > 0 )); do positional+=("$1"); shift; done ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  name="${positional[0]:-}"
+
+  # If no name and interactive, prompt; else auto-generate.
+  if [[ -z "$name" ]]; then
+    if [[ -t 0 ]]; then
+      name="$(ui_prompt_string "snapshot name" "$(date +%Y%m%d-%H%M%S)")"
+    else
+      name="snap-$(date +%Y%m%d-%H%M%S)"
+    fi
+  fi
+
+  core_tmux_alive || core_die "no running tmux server — start one first" 3
+
+  core_info "capturing ($scope)…"
+  local captured
+  captured="$(snapshot_capture "$scope")"
+
+  local id
+  id="$(store_save "$captured" "$name" "$group" "$tags" "$desc" "$force")"
+
+  local sc wc pc
+  sc="$(echo "$captured" | jq '.stats.sessions // (.sessions|length)')"
+  wc="$(echo "$captured" | jq '[.sessions[].windows[]]|length')"
+  pc="$(echo "$captured" | jq '[.sessions[].windows[].panes[]]|length')"
+  core_ok "saved '$name' (id=$id) — ${sc}s/${wc}w/${pc}p"
+}
+
+# ============================================================
+# === Command: load                                        ===
+# ============================================================
+
+cmd_load() {
+  local key="" replace=0 attach=0 commands="${TX_RESTORE_COMMANDS:-0}" keep_cwd=0
+  while (( $# > 0 )); do
+    case "$1" in
+      -r|--replace) replace=1; shift ;;
+      --attach) attach=1; shift ;;
+      -c|--commands) commands=1; shift ;;
+      -k|--keep-cwd) keep_cwd=1; shift ;;
+      -h|--help) sed -n '/^  load/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      --) shift; break ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) key="$1"; shift ;;
+    esac
+  done
+
+  [[ -n "$key" ]] || core_die "load requires a snapshot name or id" 2
+
+  local snap
+  snap="$(store_load "$key")" || core_die "snapshot not found: $key" 5
+  [[ -n "$snap" ]] || core_die "snapshot not found: $key" 5
+
+  export TX_OPT_REPLACE=$replace TX_OPT_ATTACH=$attach
+  export TX_OPT_COMMANDS=$commands TX_OPT_KEEP_CWD=$keep_cwd
+  snapshot_restore "$snap"
+  local name
+  name="$(echo "$snap" | jq -r '.meta.name')"
+  core_ok "restored '$name'"
+}
+
+# ============================================================
+# === Command: ls                                          ===
+# ============================================================
+
+cmd_ls() {
+  local group="" tag="" pattern="" sort="time" json=0
+  while (( $# > 0 )); do
+    case "$1" in
+      -g|--group) group="$2"; shift 2 ;;
+      -t|--tag) tag="$2"; shift 2 ;;
+      -n|--name) pattern="$2"; shift 2 ;;
+      --sort) sort="$2"; shift 2 ;;
+      --json) json=1; shift ;;
+      -h|--help) return 0 ;;
+      --) shift; break ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) shift ;;
+    esac
+  done
+
+  local arr
+  arr="$(store_list "$group" "$tag" "$pattern")"
+
+  case "$sort" in
+    name)  arr="$(echo "$arr" | jq -c 'sort_by(.name)')" ;;
+    group) arr="$(echo "$arr" | jq -c 'sort_by(.group,.name)')" ;;
+    time|*) arr="$(echo "$arr" | jq -c 'sort_by(.created_at) | reverse')" ;;
+  esac
+
+  if (( json )); then
+    echo "$arr" | jq '.'
+  else
+    ui_format_list "$arr"
+  fi
+}
+
+# ============================================================
+# === Command: rm                                          ===
+# ============================================================
+
+cmd_rm() {
+  local force=0 group=""
+  local keys=()
+  while (( $# > 0 )); do
+    case "$1" in
+      -f|--force) force=1; shift ;;
+      -g|--group) group="$2"; shift 2 ;;
+      -h|--help) return 0 ;;
+      --) shift; while (( $# > 0 )); do keys+=("$1"); shift; done ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) keys+=("$1"); shift ;;
+    esac
+  done
+
+  if [[ -n "$group" ]]; then
+    local ids
+    ids="$(store_list "$group" "" "" | jq -r '.[].id')"
+    [[ -n "$ids" ]] || { core_warn "no snapshots in group '$group'"; return 0; }
+    if (( ! force )) && [[ -t 0 ]]; then
+      local n; n="$(printf '%s\n' "$ids" | grep -c . || true)"
+      core_confirm "remove $n snapshot(s) in group '$group'?" n || { core_info "aborted"; return 0; }
+    fi
+    local id
+    while IFS= read -r id; do
+      [[ -n "$id" ]] && { store_remove "$id" && core_ok "removed $id"; }
+    done <<< "$ids"
+    return 0
+  fi
+
+  (( ${#keys[@]} > 0 )) || core_die "rm requires a snapshot name/id (or -g GROUP)" 2
+  local k
+  for k in "${keys[@]}"; do
+    local id
+    id="$(store_resolve "$k")" || { core_error "not found: $k"; continue; }
+    if (( ! force )) && [[ -t 0 ]]; then
+      local nm; nm="$(store_load_by_id "$id" | jq -r '.meta.name')"
+      core_confirm "remove '$nm' ($id)?" n || { core_info "skipped $k"; continue; }
+    fi
+    store_remove "$id" && core_ok "removed $k ($id)"
+  done
+}
+
+# ============================================================
+# === Command: group                                       ===
+# ============================================================
+
+cmd_group() {
+  local sub="${1:-ls}"; shift || true
+  case "$sub" in
+    ls|list)
+      local arr; arr="$(group_list)"
+      if [[ "${1:-}" == "--json" ]]; then echo "$arr" | jq '.'; else ui_format_groups "$arr"; fi
+      ;;
+    add|create)
+      local name="${1:-}" desc="${2:-}"
+      [[ -n "$name" ]] || core_die "group add requires a name" 2
+      group_create "$name" "$desc"
+      ;;
+    rm|remove)
+      local name="${1:-}" mode="reassign"
+      [[ -n "$name" ]] || core_die "group rm requires a name" 2
+      [[ "${2:-}" == "--delete" ]] && mode="delete"
+      local force=0
+      [[ "${2:-}" == "-f" || "${3:-}" == "-f" ]] && force=1
+      if (( ! force )) && [[ -t 0 ]]; then
+        core_confirm "remove group '$name' (members→default)?" y || { core_info "aborted"; return 0; }
+      fi
+      group_remove "$name" "$mode"
+      ;;
+    mv|rename)
+      local old="${1:-}" new="${2:-}"
+      [[ -n "$old" && -n "$new" ]] || core_die "group mv requires OLD NEW" 2
+      group_rename "$old" "$new"
+      ;;
+    show)
+      local name="${1:-}"
+      [[ -n "$name" ]] || core_die "group show requires a name" 2
+      group_show "$name" | jq '.'
+      ;;
+    *) core_error "unknown group subcommand: $sub"; tx_usage; return 2 ;;
+  esac
+}
+
+# ============================================================
+# === Command: rename / tag / show / diff / edit          ===
+# ============================================================
+
+cmd_rename() {
+  local old="${1:-}" new="${2:-}"
+  [[ -n "$old" && -n "$new" ]] || core_die "rename requires OLD NEW" 2
+  local id; id="$(store_resolve "$old")" || core_die "not found: $old" 5
+  store_update "$id" name "$new"
+  core_ok "renamed $old → $new"
+}
+
+cmd_tag() {
+  local key="${1:-}"; shift || true
+  [[ -n "$key" ]] || core_die "tag requires a snapshot name/id" 2
+  local id; id="$(store_resolve "$key")" || core_die "not found: $key" 5
+  local add="" remove=""
+  local a sub
+  for a in "$@"; do
+    local op="add" rest="$a"
+    case "$a" in +*) op="add"; rest="${a:1}" ;; -*) op="remove"; rest="${a:1}" ;; esac
+    # support comma-separated tags within one token: +a,b,c
+    IFS=',' read -ra _parts <<< "$rest"
+    for sub in "${_parts[@]}"; do
+      sub="${sub// /}"
+      [[ -z "$sub" ]] && continue
+      core_validate_tag "$sub" || { core_error "invalid tag: $sub"; return 1; }
+      if [[ "$op" == "add" ]]; then add+="$sub,"; else remove+="$sub,"; fi
+    done
+  done
+  store_update_tags "$id" "$add" "$remove"
+  local tags
+  tags="$(store_load_by_id "$id" | jq -r '.meta.tags | join(", ")')"
+  core_ok "tags updated: ${tags:-(none)}"
+}
+
+cmd_show() {
+  local key="${1:-}"
+  [[ -n "$key" ]] || core_die "show requires a snapshot name/id" 2
+  local snap; snap="$(store_load "$key")" || core_die "not found: $key" 5
+  ui_format_show "$snap"
+}
+
+cmd_diff() {
+  local a="${1:-}" b="${2:-}"
+  [[ -n "$a" && -n "$b" ]] || core_die "diff requires A B" 2
+  local ja jb
+  ja="$(store_load "$a")" || core_die "not found: $a" 5
+  jb="$(store_load "$b")" || core_die "not found: $b" 5
+  snapshot_diff "$ja" "$jb"
+}
+
+cmd_edit() {
+  local key="${1:-}"
+  [[ -n "$key" ]] || core_die "edit requires a snapshot name/id" 2
+  local id; id="$(store_resolve "$key")" || core_die "not found: $key" 5
+  local f; f="$(core_snapshots_dir)/${id}.json"
+  [[ -f "$f" ]] || core_die "file missing: $f" 5
+  local editor="${EDITOR:-vi}"
+  core_info "opening $f in $editor"
+  "$editor" "$f"
+  # Re-validate & refresh index after edit.
+  if jq -e '.sessions' "$f" >/dev/null 2>&1; then
+    store_index_rebuild
+    core_ok "index refreshed"
+  else
+    core_error "edited file is not valid JSON with .sessions; index not updated"
+    return 1
+  fi
+}
+
+# ============================================================
+# === Command: index                                       ===
+# ============================================================
+
+cmd_index() {
+  local sub="${1:-check}"; shift || true
+  case "$sub" in
+    rebuild) store_index_rebuild ;;
+    check)
+      store_index_ensure
+      local idx dir fc ic
+      idx="$(core_index_file)"; dir="$(core_snapshots_dir)"
+      fc="$(find "$dir" -maxdepth 1 -name '*.json' -type f | wc -l | tr -d ' ')"
+      ic="$(jq '.snapshots|length' "$idx")"
+      core_ok "index: $ic entries / $fc files"
+      ;;
+    *) core_error "unknown index subcommand: $sub"; return 2 ;;
+  esac
+}
+
+# ============================================================
+# === Command: doctor / info                               ===
+# ============================================================
+
+cmd_doctor() {
+  core_header "tx doctor"
+  local pass=0 fail=0
+  _check() { if "$@"; then core_ok "$1"; ((pass++)); else ((fail++)); fi; }
+  # tmux
+  if command -v tmux >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then core_ok "tmux $(tmux -V)"; else core_error "tmux not found"; ((fail++)); fi
+  # jq
+  if command -v jq >/dev/null 2>&1; then core_ok "jq $(jq --version)"; else core_error "jq not found"; ((fail++)); fi
+  # fzf
+  if command -v fzf >/dev/null 2>&1; then core_ok "fzf available"; else core_warn "fzf not found (interactive picker disabled)"; fi
+  # bash version
+  if (( BASH_VERSINFO[0] >= 4 )); then core_ok "bash ${BASH_VERSION}"; else core_error "bash too old: ${BASH_VERSION}"; ((fail++)); fi
+  # store dir
+  local store; store="$(core_resolve_store_dir)"
+  if mkdir -p "$store/snapshots" 2>/dev/null; then core_ok "store writable: $store"; else core_error "store not writable: $store"; ((fail++)); fi
+  # index integrity
+  store_index_ensure
+  local idx; idx="$(core_index_file)"
+  if jq -e '.snapshots' "$idx" >/dev/null 2>&1; then core_ok "index valid"; else core_error "index corrupt"; ((fail++)); fi
+  echo
+  if (( fail == 0 )); then core_ok "all checks passed"; else core_error "$fail check(s) failed"; return 1; fi
+}
+
+cmd_info() {
+  core_header "tx info"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "version:"    "$(core_c reset)" "$TX_VERSION"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "author:"     "$(core_c reset)" "$TX_AUTHOR"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "tmux:"       "$(core_c reset)" "$(core_tmux_version 2>/dev/null || echo 'n/a')"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "jq:"         "$(core_c reset)" "$(jq --version)"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "fzf:"        "$(core_c reset)" "$(command -v fzf >/dev/null 2>&1 && echo yes || echo no)"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "TX_HOME:"    "$(core_c reset)" "$TX_HOME"
+  printf '  %s%-14s%s %s\n' "$(core_c dim)" "store:"      "$(core_c reset)" "$(core_resolve_store_dir)"
+  local idx; idx="$(core_index_file)"
+  if [[ -f "$idx" ]]; then
+    local n; n="$(jq '.snapshots|length' "$idx")"
+    printf '  %s%-14s%s %s\n' "$(core_c dim)" "snapshots:"  "$(core_c reset)" "$n"
+    local g; g="$(jq '.groups|length' "$(core_groups_file)" 2>/dev/null || echo 0)"
+    printf '  %s%-14s%s %s\n' "$(core_c dim)" "groups:"     "$(core_c reset)" "$g"
+  fi
+}
+
+# ============================================================
+# === Command: start — ergonomic tmux entry point          ===
+# ============================================================
+# `tx start` is the single entry point that:
+#   - outside tmux: bootstraps a tiny bootstrap session (so a server exists),
+#     runs the snapshot picker, restores the chosen snapshot, then attaches.
+#   - inside tmux:  runs the picker and switches the client to the restored
+#     session.
+# Performance: only called on demand — never auto-run by tmux.conf (avoids
+# adding latency to every tmux start). The picker uses the cached index (cheap).
+# `tx start NAME` skips the picker and restores NAME directly.
+
+cmd_start() {
+  local key="" replace=0 attach=1
+  while (( $# > 0 )); do
+    case "$1" in
+      -r|--replace) replace=1; shift ;;
+      --no-attach) attach=0; shift ;;
+      -h|--help) sed -n '/^  start/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      --) shift; break ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) key="$1"; shift ;;
+    esac
+  done
+
+  # If a name/id was given, restore it directly (no picker).
+  if [[ -n "$key" ]]; then
+    if [[ -z "${TMUX:-}" ]]; then
+      # outside tmux — bootstrap a throwaway session so a server exists, then
+      # restore the snapshot, then attach to the restored session.
+      core_info "starting tmux and restoring '$key'…"
+      cmd_load "$key" --replace $([[ $attach -eq 1 ]] && echo --attach)
+      # If load created the session detached, attach now.
+      if ! [[ -n "${TMUX:-}" ]]; then
+        local target; target="$(store_load "$key" | jq -r '.sessions[0].name')"
+        core_tmux attach-session -t "$target" 2>/dev/null || true
+      fi
+    else
+      cmd_load "$key" --replace $([[ $attach -eq 1 ]] && echo --attach)
+    fi
+    return $?
+  fi
+
+  # No name → interactive picker.
+  command -v fzf >/dev/null 2>&1 || core_die "fzf required for interactive start" 2
+  store_index_ensure
+  local arr; arr="$(store_list "" "" "")"
+  local count; count="$(echo "$arr" | jq 'length')"
+  if [[ "$count" == "0" ]]; then
+    core_warn "no snapshots stored yet — run 'tx save' first"
+    # If outside tmux, just start a plain tmux session.
+    if [[ -z "${TMUX:-}" ]]; then
+      core_info "starting a plain tmux session…"
+      exec tmux
+    fi
+    return 0
+  fi
+
+  local pick
+  pick="$(ui_pick_snapshot "$arr")" || { core_info "cancelled"; return 0; }
+
+  # The picker may return rm:<id>, edit:<id>, or <id>.
+  case "$pick" in
+    rm:*)
+      cmd_rm "${pick#rm:}" -f
+      return $?
+      ;;
+    edit:*)
+      cmd_edit "${pick#edit:}"
+      return $?
+      ;;
+  esac
+
+  # pick is a snapshot id → restore it.
+  if [[ -z "${TMUX:-}" ]]; then
+    # Outside tmux: restore (creates a detached session), then attach.
+    cmd_load "$pick" --replace
+    local target; target="$(store_load_by_id "$pick" | jq -r '.sessions[0].name')"
+    exec tmux attach-session -t "$target"
+  else
+    cmd_load "$pick" --replace --attach
+  fi
+}
+
+# ============================================================
+# === Command: last — restore / list most-recent           ===
+# ============================================================
+# `tx last`        → restore the most-recent snapshot (--attach if in tmux)
+# `tx last -n 5`   → list the 5 most-recent (no restore)
+# `tx last -r`     → replace existing session on restore
+
+cmd_last() {
+  local n=1 replace=0 list_only=0
+  while (( $# > 0 )); do
+    case "$1" in
+      -n) n="$2"; shift 2 ;;
+      -r|--replace) replace=1; shift ;;
+      --list) list_only=1; shift ;;
+      -h|--help) return 0 ;;
+      --) shift; break ;;
+      -*) core_error "unknown option: $1"; return 2 ;;
+      *) n="$1"; shift ;;
+    esac
+  done
+  store_index_ensure
+  local arr; arr="$(store_list "" "" "" | jq -c --argjson n "$n" '.[0:$n]')"
+  local count; count="$(echo "$arr" | jq 'length')"
+  if [[ "$count" == "0" ]]; then
+    core_warn "no snapshots stored"
+    return 0
+  fi
+  if (( list_only )) || (( n > 1 )); then
+    ui_format_list "$arr"
+    return 0
+  fi
+  # n == 1, restore the single most-recent.
+  local id; id="$(echo "$arr" | jq -r '.[0].id')"
+  local name; name="$(echo "$arr" | jq -r '.[0].name')"
+  core_info "restoring most-recent: $name ($id)"
+  local args=("$id")
+  (( replace )) && args+=(--replace)
+  [[ -n "${TMUX:-}" ]] && args+=(--attach)
+  cmd_load "${args[@]}"
+}
+
+# ============================================================
+# === Default: interactive picker → load                  ===
+# ============================================================
+
+cmd_default() {
+  # If args given, treat as load key for convenience (with flags).
+  if (( $# > 0 )); then cmd_load "$@"; return $?; fi
+  # Outside tmux with no args → suggest `tx start`.
+  if [[ -z "${TMUX:-}" ]]; then
+    # User-facing guidance — print directly (NOT core_info, which is log-level
+    # gated and would be hidden under TX_LOG_LEVEL=error).
+    printf '%snot inside tmux — use `tx start` to bootstrap a session from a snapshot%s\n' \
+      "$(core_c yellow)" "$(core_c reset)"
+    printf '  %stx start%s          # pick a snapshot to restore\n' "$(core_c bold)" "$(core_c reset)"
+    printf '  %stx start myproj%s   # restore a named snapshot\n' "$(core_c bold)" "$(core_c reset)"
+    printf '  %stx ls%s             # list stored snapshots\n' "$(core_c bold)" "$(core_c reset)"
+    return 0
+  fi
+  command -v fzf >/dev/null 2>&1 || core_die "fzf required for interactive mode" 2
+  store_index_ensure
+  local arr; arr="$(store_list "" "" "")"
+  local pick
+  pick="$(ui_pick_snapshot "$arr")" || { core_info "cancelled"; return 0; }
+  case "$pick" in
+    rm:*)
+      local id="${pick#rm:}"
+      cmd_rm "$id" -f
+      ;;
+    edit:*)
+      local id="${pick#edit:}"
+      cmd_edit "$id"
+      ;;
+    *)
+      cmd_load "$pick" --attach
+      ;;
+  esac
+}
+
+# ============================================================
+# === Main dispatch                                        ===
+# ============================================================
+
+main() {
+  # Pre-scan for global flags.
+  local cmd="" first=1
+  local -a rest=()
+  while (( $# > 0 )); do
+    if (( first )); then
+      case "$1" in
+        -h|--help) tx_usage; exit 0 ;;
+        -v|--version) echo "tx $TX_VERSION"; exit 0 ;;
+        --color) TX_COLOR="$2"; export TX_COLOR; shift 2; continue ;;
+        --log-level) TX_LOG_LEVEL="$2"; export TX_LOG_LEVEL; shift 2; continue ;;
+        --color=*) TX_COLOR="${1#*=}"; export TX_COLOR; shift; continue ;;
+        --log-level=*) TX_LOG_LEVEL="${1#*=}"; export TX_LOG_LEVEL; shift; continue ;;
+        *) first=0 ;;
+      esac
+    fi
+    if [[ -z "$cmd" ]]; then
+      cmd="$1"; shift
+    else
+      rest+=("$1"); shift
+    fi
+  done
+
+  # Ensure store exists for all commands.
+  store_init 2>/dev/null || true
+
+  case "${cmd:-}" in
+    "") cmd_default "${rest[@]}" ;;
+    start)    cmd_start "${rest[@]}" ;;
+    save|s)   cmd_save "${rest[@]}" ;;
+    load|l|restore) cmd_load "${rest[@]}" ;;
+    last|recent) cmd_last "${rest[@]}" ;;
+    ls|list)  cmd_ls "${rest[@]}" ;;
+    rm|remove) cmd_rm "${rest[@]}" ;;
+    group|g)  cmd_group "${rest[@]}" ;;
+    rename|mv) cmd_rename "${rest[@]}" ;;
+    tag|t)    cmd_tag "${rest[@]}" ;;
+    show)     cmd_show "${rest[@]}" ;;
+    diff)     cmd_diff "${rest[@]}" ;;
+    edit)     cmd_edit "${rest[@]}" ;;
+    index)    cmd_index "${rest[@]}" ;;
+    doctor)   cmd_doctor ;;
+    info)     cmd_info ;;
+    -h|--help|help) tx_usage ;;
+    *) core_error "unknown command: $cmd"; echo; tx_usage; exit 2 ;;
+  esac
+}
+
+main "$@"

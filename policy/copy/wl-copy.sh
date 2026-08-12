@@ -1,7 +1,6 @@
 #!/bin/bash
 # @path: ~/.config/tmux/policy/copy/wl-copy.sh
-# @anthor: redskaber
-# @datetime: 2026-04-19
-# @description: handle wl-copy
+# @author: redskaber
+# @description: Wayland wl-clipboard backend
 
 wl-copy
