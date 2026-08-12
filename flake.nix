@@ -1,26 +1,30 @@
 # @file: flake.nix
 # @author: redskaber
 # @desc: Flake wrapper for tmux-config. Exposes:
-#          - the config source (for xdg.configFile."tmux")
+#          - the config source (for xdg.configFile."tmux" = { source = inputs.tmux-config; })
 #          - a home-manager module (programs.tx) for PATH wiring
 # @usage in your flake:
-#   inputs.tmux-config.url = "github:you/tmux-config";
+#   inputs.tmux-config.url = "github:redskaber/tmux-config";
 #   # in home config:
-#   imports = [ inputs.tmux-config.nixosModules.tx-home ];
+#   imports = [ inputs.tmux-config.homeModules.tx-home ];
 #   programs.tx.enable = true;
 #   xdg.configFile."tmux" = { source = inputs.tmux-config; recursive = true; };
 {
   description = "tmux-config — policy-driven tmux config + tx window-organization manager";
 
-  outputs = { self, ... }: {
-    # The config source tree (for xdg.configFile."tmux" = { source = self; }).
-    # Flake inputs are self-contained source trees, so this is idiomatic.
-    # (No overlay needed — consumers use `source = self` directly.)
+  outputs = { self, ... }:
+    let
+      txHomeModule = import ./nix/tx-home.nix;
+    in
+    {
+      # The config source tree — consumers use `source = inputs.tmux-config`
+      # directly (flake inputs ARE source trees).
 
-    # Home-manager module usable from any flake that imports this as an input.
-    homeModules.tx-home = import ./nix/tx-home.nix;
+      # Home-manager module: adds ~/.config/tmux/bin to PATH for ALL shells.
+      # Usage: imports = [ inputs.tmux-config.homeModules.tx-home ];
+      homeModules.tx-home = txHomeModule;
 
-    # Convenience alias.
-    homeModules.default = self.homeModules.tx-home;
-  };
+      # Convenience alias: imports = [ inputs.tmux-config.homeModules.default ];
+      homeModules.default = txHomeModule;
+    };
 }

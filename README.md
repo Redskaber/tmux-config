@@ -52,7 +52,19 @@ inputs.tmux-config.url = "github:redskaber/tmux-config";
 }
 ```
 
-Then `home-manager switch && exec $SHELL && tx doctor`.
+Then:
+
+```bash
+nix flake update tmux-config    # lock the latest revision (MUST have homeModules output)
+home-manager switch --flake .#kilig@nixos
+exec $SHELL
+tx doctor
+```
+
+> **Troubleshooting `attribute 'homeModules' missing`:** this means your
+> `flake.lock` points to an older revision of tmux-config that predates the
+> `homeModules` output. Run `nix flake update tmux-config` to re-lock to the
+> latest, then `home-manager switch` again.
 
 **Or**, without the module — add one line to your existing home config:
 
@@ -403,6 +415,22 @@ and verifies:
 ---
 
 ## Changelog
+
+### v1.3.1 — flake module fix
+
+- **flake.nix robustness** — removed `self.homeModules` self-reference (could
+  cause lazy-eval issues in some Nix versions); the module is now bound to a
+  `let` variable and referenced directly by both `homeModules.tx-home` and
+  `homeModules.default`.
+- **Module cleanup** — `nix/tx-home.nix` removed redundant `or {}` fallback on
+  `config.programs.tx` (the module defines the option itself), added
+  `defaultText` to options for better `mkEnableOption` docs, consolidated
+  `home.sessionVariables` into a single attrset.
+- **Verified end-to-end with Nix 2.30** — `nix flake show` confirms
+  `homeModules` is present; a consumer flake confirms `homeModules.tx-home` is
+  a valid module function; the module evaluates correctly with mock args.
+- **README** — added troubleshooting note for `attribute 'homeModules' missing`
+  (caused by a stale flake.lock pointing to a pre-module revision).
 
 ### v1.3.0 — NixOS/home-manager support + fzf theme alignment
 
