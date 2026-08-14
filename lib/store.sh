@@ -42,13 +42,20 @@ store_empty_groups_json() {
 # === Atomic write                                         ===
 # ============================================================
 
-# _atomic_write <path> <content>
+# _atomic_write <path> <content> — write via temp file + rename; clean up on failure.
 _atomic_write() {
   local path="$1" content="$2"
   local dir; dir="$(dirname "$path")"
   local tmp; tmp="$(mktemp -p "$dir" .tmp.XXXXXX)"
-  printf '%s' "$content" > "$tmp"
-  mv -f "$tmp" "$path"
+  # Ensure temp file is removed if printf or mv fails (set -e would exit without cleanup).
+  if ! printf '%s' "$content" > "$tmp"; then
+    rm -f "$tmp"
+    return 1
+  fi
+  if ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
 }
 
 # ============================================================
@@ -239,12 +246,13 @@ store_index_rebuild() {
     entries+=("$e")
   done < <(find "$dir" -maxdepth 1 -name '*.json' -type f | sort)
 
-  local arr='[]'
-  local e
-  for e in "${entries[@]}"; do
-    arr="$(jq --argjson e "$e" --argjson a "$arr" '$a + [$e]' <<<"$e")"
-  done
-  # sort by created_at desc
+  # Build the array in ONE jq invocation (O(n) instead of O(n²) fork-per-entry).
+  local arr
+  if (( ${#entries[@]} == 0 )); then
+    arr='[]'
+  else
+    arr="$(printf '%s\n' "${entries[@]}" | jq -cs '.')"
+  fi
   local updated
   updated="$(jq -n --arg schema "$TX_SCHEMA_INDEX" --arg at "$(core_now_iso)" --argjson arr "$arr" \
     '{schema:$schema, updated_at:$at, snapshots:($arr | sort_by(.created_at) | reverse)}')"
@@ -317,10 +325,10 @@ store_update() {
   local f="$(core_snapshots_dir)/${id}.json"
   [[ -f "$f" ]] || { core_error "no snapshot with id=$id"; return 1; }
   case "$field" in
-    name|group|description) ;;
+    name|group) core_validate_name "$value" || return 1 ;;
+    description) ;;  # free-form, no validation
     *) core_error "unsupported field: $field"; return 1 ;;
   esac
-  core_validate_name "$value" 2>/dev/null || true
   local updated
   updated="$(jq --arg v "$value" --arg f "$field" '.meta[$f]=$v' "$f")"
   _atomic_write "$f" "$updated"

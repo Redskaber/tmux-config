@@ -52,8 +52,8 @@ source "$TX_HOME/lib/ui.sh"
 # ============================================================
 
 tx_usage() {
-  cat <<'EOF'
-tx — tmux window-organization manager (v1.1.0)
+  cat <<EOF
+tx — tmux window-organization manager (v${TX_VERSION})
 
 USAGE
   tx [command] [options]
@@ -63,23 +63,22 @@ COMMANDS
   start   [NAME] [-r]        START tmux + pick/restore a snapshot (ergonomic entry)
                              — outside tmux: bootstraps a server then restores
                              — inside tmux:  picker → switch client
-  save    [NAME] [-g -t -d -a -s -f -y]   snapshot current session(s)
-  load    <NAME|ID> [-r -a -c -k]         restore a snapshot
-  last    [-r] [-n N]                     restore or list N most-recent snapshots
-  ls      [-g -t -n --sort --json]        list / filter snapshots
-  rm      <NAME|ID…> [-f] | -g GROUP      remove snapshot(s)
-  group   <ls|add|rm|mv|show> [args]      manage groups
-  rename  <OLD> <NEW>                     rename a snapshot
-  tag     <NAME|ID> [+t1,-t2 …]           add/remove tags
-  show    <NAME|ID>                       show snapshot details (tree)
-  diff    <A> <B>                         structural diff of two snapshots
-  edit    <NAME|ID>                       edit snapshot JSON in $EDITOR
-  index   <rebuild|check>                 manage the query index
-  doctor                            diagnose environment
-  info                              system & store info
+  save    [NAME] [-g -t -d -a -s -f]   snapshot current session(s)
+  load    <NAME|ID> [-r -A -c -k]      restore a snapshot (bootstraps tmux if needed)
+  last    [-r] [-n N]                  restore or list N most-recent snapshots
+  ls      [-g -t -n --sort --json]     list / filter snapshots
+  rm      <NAME|ID…> [-f] | -g GROUP   remove snapshot(s)
+  group   <ls|add|rm|mv|show> [args]   manage groups
+  rename  <OLD> <NEW>                  rename a snapshot
+  tag     <NAME|ID> [+t1,-t2 …]        add/remove tags
+  show    <NAME|ID>                    show snapshot details (tree)
+  diff    <A> <B>                      structural diff of two snapshots
+  edit    <NAME|ID>                    edit snapshot JSON in \$EDITOR
+  index   <rebuild|check>              manage the query index
+  doctor                          diagnose environment
+  info                            system & store info
 
 OPTIONS
-  -y, --yes              skip confirmations
   -f, --force            overwrite / force
   -a, --all              operate on all sessions (save)
   -s, --session NAME     scope to a specific session (save)
@@ -87,9 +86,9 @@ OPTIONS
   -t, --tags T1,T2       tags (comma-separated)
   -d, --desc TEXT        description
   -r, --replace          replace existing session on load
+  -A, --attach           attach / switch-client after restore
   -c, --commands         re-run captured commands on restore
   -k, --keep-cwd         ignore stored cwd on restore
-      --attach           attach / switch-client after restore
       --json             machine-readable output
       --color WHEN       auto|never|force
       --log-level L      debug|info|warn|error
@@ -119,12 +118,69 @@ ENV
 EOF
 }
 
+# Print per-command help (avoids fragile sed slicing of tx_usage).
+_print_help() {
+  local cmd="$1"
+  case "$cmd" in
+    save)  cat <<'EOF'
+tx save [NAME] [-g GROUP] [-t TAGS] [-d DESC] [-a] [-s SESSION] [-f] [-y]
+  Capture current session(s) as a named snapshot.
+  -a          capture ALL sessions
+  -s NAME     capture a specific session
+  -g GROUP    assign to a group
+  -t T1,T2    comma-separated tags
+  -d TEXT     description
+  -f          overwrite if name exists
+  -y          (accepted, no-op)
+EOF
+    ;;
+    load)  cat <<'EOF'
+tx load <NAME|ID> [-r] [-A] [-c] [-k]
+  Restore a snapshot (bootstraps tmux server if none running).
+  -r          replace existing session of the same name
+  -A          attach after restore (outside tmux: exec; inside: switch-client)
+  -c          re-run captured commands in panes
+  -k          ignore stored cwd, use current
+EOF
+    ;;
+    start) cat <<'EOF'
+tx start [NAME] [-r] [--no-attach]
+  Ergonomic entry: start tmux + restore a snapshot.
+  No NAME → interactive picker (or restore most-recent if no fzf/TTY).
+  -r          replace existing session (default: on)
+  --no-attach leave the session detached
+EOF
+    ;;
+    ls)    cat <<'EOF'
+tx ls [-g GROUP] [-t TAG] [-n PATTERN] [--sort NAME|GROUP|TIME] [--json]
+  List / filter snapshots.
+EOF
+    ;;
+    last)  cat <<'EOF'
+tx last [-r] [-n N] [--list]
+  Restore the most-recent snapshot (always attaches).
+  -n N        list N most-recent instead of restoring (N>1 → list mode)
+  -r          replace existing session on restore
+  --list      force list mode (no restore)
+EOF
+    ;;
+    rm)    cat <<'EOF'
+tx rm <NAME|ID…> [-f] | -g GROUP [-f]
+  Remove snapshot(s).
+  -f          skip confirmation
+  -g GROUP    remove all snapshots in GROUP
+EOF
+    ;;
+    *) tx_usage ;;
+  esac
+}
+
 # ============================================================
 # === Command: save                                        ===
 # ============================================================
 
 cmd_save() {
-  local name="" group="" tags="" desc="" scope="current" force=0 yes=0
+  local name="" group="" tags="" desc="" scope="current" force=0
   local positional=()
   while (( $# > 0 )); do
     case "$1" in
@@ -134,8 +190,8 @@ cmd_save() {
       -a|--all)   scope="all"; shift ;;
       -s|--session) scope="$2"; shift 2 ;;
       -f|--force) force=1; shift ;;
-      -y|--yes)   yes=1; shift ;;
-      -h|--help) sed -n '/^  save/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      -y|--yes)   shift ;;  # accepted for compat (no-op: save has no confirm)
+      -h|--help) _print_help save; return 0 ;;
       --) shift; while (( $# > 0 )); do positional+=("$1"); shift; done ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) positional+=("$1"); shift ;;
@@ -177,10 +233,10 @@ cmd_load() {
   while (( $# > 0 )); do
     case "$1" in
       -r|--replace) replace=1; shift ;;
-      --attach) attach=1; shift ;;
+      -A|--attach) attach=1; shift ;;
       -c|--commands) commands=1; shift ;;
       -k|--keep-cwd) keep_cwd=1; shift ;;
-      -h|--help) sed -n '/^  load/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      -h|--help) _print_help load; return 0 ;;
       --) shift; break ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) key="$1"; shift ;;
@@ -193,12 +249,31 @@ cmd_load() {
   snap="$(store_load "$key")" || core_die "snapshot not found: $key" 5
   [[ -n "$snap" ]] || core_die "snapshot not found: $key" 5
 
+  local was_in_tmux=0
+  [[ -n "${TMUX:-}" ]] && was_in_tmux=1
+
   export TX_OPT_REPLACE=$replace TX_OPT_ATTACH=$attach
   export TX_OPT_COMMANDS=$commands TX_OPT_KEEP_CWD=$keep_cwd
   snapshot_restore "$snap"
   local name
   name="$(echo "$snap" | jq -r '.meta.name')"
   core_ok "restored '$name'"
+
+  # Attach logic (clear, no inversion):
+  #   - Inside tmux + --attach  → switch-client (handled by snapshot_restore)
+  #   - Outside tmux + --attach → exec tmux attach (real terminal) or hint (script)
+  #   - Outside tmux + no flag  → leave detached, hint how to attach
+  if (( ! was_in_tmux )); then
+    local target
+    target="$(echo "$snap" | jq -r '.sessions[0].name')"
+    if [[ -n "$target" && "$target" != "null" ]]; then
+      if (( attach )) && [[ -t 1 ]]; then
+        exec tmux attach-session -t "$target"
+      else
+        core_info "session '$target' created. Attach: tmux attach -t $target"
+      fi
+    fi
+  fi
 }
 
 # ============================================================
@@ -214,7 +289,7 @@ cmd_ls() {
       -n|--name) pattern="$2"; shift 2 ;;
       --sort) sort="$2"; shift 2 ;;
       --json) json=1; shift ;;
-      -h|--help) return 0 ;;
+      -h|--help) _print_help ls; return 0 ;;
       --) shift; break ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) shift ;;
@@ -248,7 +323,7 @@ cmd_rm() {
     case "$1" in
       -f|--force) force=1; shift ;;
       -g|--group) group="$2"; shift 2 ;;
-      -h|--help) return 0 ;;
+      -h|--help) _print_help rm; return 0 ;;
       --) shift; while (( $# > 0 )); do keys+=("$1"); shift; done ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) keys+=("$1"); shift ;;
@@ -343,15 +418,27 @@ cmd_tag() {
   local add="" remove=""
   local a sub
   for a in "$@"; do
-    local op="add" rest="$a"
+    # Each token may start with + (add) or - (remove); default is add.
+    # The op applies to ALL comma-separated sub-tokens UNLESS a sub-token
+    # carries its own +/- prefix (which overrides). Examples:
+    #   +a,b,c     → add a, b, c
+    #   -a,b       → remove a, b
+    #   +a,b,-c    → add a, b; remove c
+    #   -a,+b      → remove a; add b
+    local op="add"
+    local rest="$a"
     case "$a" in +*) op="add"; rest="${a:1}" ;; -*) op="remove"; rest="${a:1}" ;; esac
-    # support comma-separated tags within one token: +a,b,c
     IFS=',' read -ra _parts <<< "$rest"
     for sub in "${_parts[@]}"; do
       sub="${sub// /}"
       [[ -z "$sub" ]] && continue
+      # A sub-token may override the inherited op with its own +/- prefix.
+      local subop="$op"
+      case "$sub" in +*) subop="add"; sub="${sub:1}" ;; -*) subop="remove"; sub="${sub:1}" ;; esac
+      sub="${sub// /}"
+      [[ -z "$sub" ]] && continue
       core_validate_tag "$sub" || { core_error "invalid tag: $sub"; return 1; }
-      if [[ "$op" == "add" ]]; then add+="$sub,"; else remove+="$sub,"; fi
+      if [[ "$subop" == "add" ]]; then add+="$sub,"; else remove+="$sub,"; fi
     done
   done
   store_update_tags "$id" "$add" "$remove"
@@ -422,7 +509,6 @@ cmd_index() {
 cmd_doctor() {
   core_header "tx doctor"
   local pass=0 fail=0
-  _check() { if "$@"; then core_ok "$1"; ((pass++)); else ((fail++)); fi; }
   # tmux
   if command -v tmux >/dev/null 2>&1 && tmux -V >/dev/null 2>&1; then core_ok "tmux $(tmux -V)"; else core_error "tmux not found"; ((fail++)); fi
   # jq
@@ -473,75 +559,64 @@ cmd_info() {
 # `tx start NAME` skips the picker and restores NAME directly.
 
 cmd_start() {
-  local key="" replace=0 attach=1
+  local key="" replace=1 attach=1
   while (( $# > 0 )); do
     case "$1" in
       -r|--replace) replace=1; shift ;;
+      --no-replace) replace=0; shift ;;
       --no-attach) attach=0; shift ;;
-      -h|--help) sed -n '/^  start/,/^$/p' <<<"$(tx_usage)"; return 0 ;;
+      -h|--help) _print_help start; return 0 ;;
       --) shift; break ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) key="$1"; shift ;;
     esac
   done
 
-  # If a name/id was given, restore it directly (no picker).
+  # `tx start NAME` → restore NAME directly (cmd_load handles bootstrap+attach).
   if [[ -n "$key" ]]; then
-    if [[ -z "${TMUX:-}" ]]; then
-      # outside tmux — bootstrap a throwaway session so a server exists, then
-      # restore the snapshot, then attach to the restored session.
-      core_info "starting tmux and restoring '$key'…"
-      cmd_load "$key" --replace $([[ $attach -eq 1 ]] && echo --attach)
-      # If load created the session detached, attach now.
-      if ! [[ -n "${TMUX:-}" ]]; then
-        local target; target="$(store_load "$key" | jq -r '.sessions[0].name')"
-        core_tmux attach-session -t "$target" 2>/dev/null || true
-      fi
-    else
-      cmd_load "$key" --replace $([[ $attach -eq 1 ]] && echo --attach)
-    fi
+    local args=("$key")
+    (( replace )) && args+=(--replace)
+    (( attach )) && args+=(--attach)
+    cmd_load "${args[@]}"
     return $?
   fi
 
-  # No name → interactive picker.
-  command -v fzf >/dev/null 2>&1 || core_die "fzf required for interactive start" 2
+  # `tx start` (no name) → interactive picker, or fallback.
   store_index_ensure
   local arr; arr="$(store_list "" "" "")"
   local count; count="$(echo "$arr" | jq 'length')"
+
   if [[ "$count" == "0" ]]; then
-    core_warn "no snapshots stored yet — run 'tx save' first"
-    # If outside tmux, just start a plain tmux session.
+    # No snapshots: start a plain tmux session (or warn if inside tmux).
     if [[ -z "${TMUX:-}" ]]; then
-      core_info "starting a plain tmux session…"
+      core_info "no snapshots stored — starting a plain tmux session"
       exec tmux
+    else
+      core_warn "no snapshots stored — run 'tx save' first"
+      return 0
     fi
-    return 0
   fi
 
-  local pick
-  pick="$(ui_pick_snapshot "$arr")" || { core_info "cancelled"; return 0; }
-
-  # The picker may return rm:<id>, edit:<id>, or <id>.
-  case "$pick" in
-    rm:*)
-      cmd_rm "${pick#rm:}" -f
-      return $?
-      ;;
-    edit:*)
-      cmd_edit "${pick#edit:}"
-      return $?
-      ;;
-  esac
-
-  # pick is a snapshot id → restore it.
-  if [[ -z "${TMUX:-}" ]]; then
-    # Outside tmux: restore (creates a detached session), then attach.
-    cmd_load "$pick" --replace
-    local target; target="$(store_load_by_id "$pick" | jq -r '.sessions[0].name')"
-    exec tmux attach-session -t "$target"
+  # Try the fzf picker; if fzf unavailable or no TTY, fallback to most-recent.
+  local pick=""
+  if command -v fzf >/dev/null 2>&1 && [[ -t 0 ]]; then
+    pick="$(ui_pick_snapshot "$arr")" || { core_info "cancelled"; return 0; }
+    # Handle rm:/edit: actions from the picker.
+    case "$pick" in
+      rm:*)  cmd_rm "${pick#rm:}" -f; return $? ;;
+      edit:*) cmd_edit "${pick#edit:}"; return $? ;;
+    esac
   else
-    cmd_load "$pick" --replace --attach
+    # No fzf or no TTY → restore the most-recent snapshot automatically.
+    pick="$(echo "$arr" | jq -r '.[0].id')"
+    core_info "no interactive picker — restoring most-recent: $(echo "$arr" | jq -r '.[0].name')"
   fi
+
+  # Restore the picked (or fallback) snapshot.
+  local args=("$pick")
+  (( replace )) && args+=(--replace)
+  (( attach )) && args+=(--attach)
+  cmd_load "${args[@]}"
 }
 
 # ============================================================
@@ -558,7 +633,7 @@ cmd_last() {
       -n) n="$2"; shift 2 ;;
       -r|--replace) replace=1; shift ;;
       --list) list_only=1; shift ;;
-      -h|--help) return 0 ;;
+      -h|--help) _print_help last; return 0 ;;
       --) shift; break ;;
       -*) core_error "unknown option: $1"; return 2 ;;
       *) n="$1"; shift ;;
@@ -575,13 +650,12 @@ cmd_last() {
     ui_format_list "$arr"
     return 0
   fi
-  # n == 1, restore the single most-recent.
+  # n == 1, restore the single most-recent. Always attach (it's "resume work").
   local id; id="$(echo "$arr" | jq -r '.[0].id')"
   local name; name="$(echo "$arr" | jq -r '.[0].name')"
   core_info "restoring most-recent: $name ($id)"
-  local args=("$id")
+  local args=("$id" --attach)
   (( replace )) && args+=(--replace)
-  [[ -n "${TMUX:-}" ]] && args+=(--attach)
   cmd_load "${args[@]}"
 }
 
@@ -590,19 +664,18 @@ cmd_last() {
 # ============================================================
 
 cmd_default() {
-  # If args given, treat as load key for convenience (with flags).
-  if (( $# > 0 )); then cmd_load "$@"; return $?; fi
-  # Outside tmux with no args → suggest `tx start`.
+  # `tx` (no args) outside tmux → suggest `tx start`.
+  # Print directly (NOT core_info) so guidance is always visible regardless of
+  # TX_LOG_LEVEL — this is user-facing guidance, not a log message.
   if [[ -z "${TMUX:-}" ]]; then
-    # User-facing guidance — print directly (NOT core_info, which is log-level
-    # gated and would be hidden under TX_LOG_LEVEL=error).
-    printf '%snot inside tmux — use `tx start` to bootstrap a session from a snapshot%s\n' \
+    printf '%snot inside tmux — use `tx start` to bootstrap a session%s\n' \
       "$(core_c yellow)" "$(core_c reset)"
     printf '  %stx start%s          # pick a snapshot to restore\n' "$(core_c bold)" "$(core_c reset)"
     printf '  %stx start myproj%s   # restore a named snapshot\n' "$(core_c bold)" "$(core_c reset)"
     printf '  %stx ls%s             # list stored snapshots\n' "$(core_c bold)" "$(core_c reset)"
     return 0
   fi
+  # `tx` (no args) inside tmux → interactive picker.
   command -v fzf >/dev/null 2>&1 || core_die "fzf required for interactive mode" 2
   store_index_ensure
   local arr; arr="$(store_list "" "" "")"

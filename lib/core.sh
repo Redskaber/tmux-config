@@ -15,7 +15,7 @@ _TX_CORE_LOADED=1
 # === Constants                                            ===
 # ============================================================
 
-readonly TX_VERSION="1.4.0"
+readonly TX_VERSION="2.0.0"
 readonly TX_AUTHOR="redskaber"
 readonly TX_SCHEMA_SNAPSHOT="tx.snapshot.v1"
 readonly TX_SCHEMA_INDEX="tx.index.v1"
@@ -130,26 +130,7 @@ core_groups_file() {
   printf '%s/groups.json\n' "$(core_resolve_store_dir)"
 }
 
-# Read a runtime config value with a fallback.
-# Lookup order: env var TX_<KEY> > file ($store/config.env) > default.
-# core_config_get <key> <default>
-core_config_get() {
-  local key="$1" default="$2"
-  local env_key
-  env_key="TX_$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
-  if [[ -n "${!env_key:-}" ]]; then
-    printf '%s\n' "${!env_key}"
-    return 0
-  fi
-  local cfg
-  cfg="$(core_resolve_store_dir)/config.env"
-  if [[ -f "$cfg" ]]; then
-    local v
-    v="$(grep -E "^${key}=" "$cfg" 2>/dev/null | head -1 | cut -d= -f2-)"
-    if [[ -n "$v" ]]; then printf '%s\n' "$v"; return 0; fi
-  fi
-  printf '%s\n' "$default"
-}
+# (core_config_get removed — unused. Env vars + TX_STORE_DIR cover all needs.)
 
 # ============================================================
 # === Color / TTY detection                                 ===
@@ -368,11 +349,7 @@ core_now_iso() {
   date +%Y-%m-%dT%H:%M:%S%:z
 }
 
-# Epoch seconds for a given iso string (best-effort; portable via date -d).
-core_iso_to_epoch() {
-  local iso="$1"
-  date -d "$iso" +%s 2>/dev/null || echo 0
-}
+# (core_iso_to_epoch removed — unused, and GNU date -d is not portable to macOS.)
 
 # ============================================================
 # === UI helpers                                           ===
@@ -415,7 +392,4 @@ core_truncate() {
   fi
 }
 
-# JSON-safe escape a string via jq (no surrounding quotes).
-core_jq_escape() {
-  jq -Rn --arg s "$1" '$s'
-}
+# (core_jq_escape removed — unused; jq --arg handles escaping.)

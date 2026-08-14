@@ -262,15 +262,9 @@ test_diff() {
 }
 
 test_index_self_heal() {
-  setup_tmux
-  build_session dev
-  "$BIN" save h -s dev -y >/dev/null 2>&1
-  # corrupt the index
-  printf '' > "$TX_STORE_DIR/index.json"
-  "$BIN" index check 2>&1 | grep -q "index:" && assert_eq "index rebuilt after corruption" "1" "1" || assert_eq "index check ran" "1" "0"
-  local n; n="$(jq '.snapshots|length' "$TX_STORE_DIR/index.json")"
-  assert_eq "index has 1 entry after heal" "1" "$n"
-  teardown_tmux
+  # (Replaced by test_index_rebuild_after_corruption which actually verifies
+  # the self-heal instead of being a tautology. Kept as a no-op for compat.)
+  :
 }
 
 test_show_renders_tree() {
@@ -533,6 +527,95 @@ test_fzf_flags_centralized() {
   teardown_tmux
 }
 
+test_help_subcommands_print() {
+  # -h on subcommands should print help text (not empty, not silence).
+  setup_tmux
+  build_session dev
+  local out
+  out="$("$BIN" save -h 2>&1)" || true
+  assert_contains "tx save -h prints help" "Capture current session" "$out"
+  out="$("$BIN" load -h 2>&1)" || true
+  assert_contains "tx load -h prints help" "Restore a snapshot" "$out"
+  out="$("$BIN" start -h 2>&1)" || true
+  assert_contains "tx start -h prints help" "Ergonomic entry" "$out"
+  out="$("$BIN" ls -h 2>&1)" || true
+  assert_contains "tx ls -h prints help" "List / filter" "$out"
+  out="$("$BIN" rm -h 2>&1)" || true
+  assert_contains "tx rm -h prints help" "Remove snapshot" "$out"
+  out="$("$BIN" last -h 2>&1)" || true
+  assert_contains "tx last -h prints help" "most-recent" "$out"
+  teardown_tmux
+}
+
+test_version_not_hardcoded() {
+  # tx_usage should show the real version, not a hardcoded "v1.1.0".
+  setup_tmux
+  local v; v="$("$BIN" --version 2>&1 | awk '{print $2}')"  # "1.5.0"
+  local u; u="$("$BIN" --help 2>&1 | head -1)"               # "tx — ... (v1.5.0)"
+  assert_contains "usage shows real version" "$v" "$u"
+  teardown_tmux
+}
+
+test_rename_rejects_invalid_name() {
+  # store_update must validate names (P13: previously bypassed with || true).
+  setup_tmux
+  build_session dev
+  "$BIN" save snap -s dev -y >/dev/null 2>&1
+  # Empty name should fail
+  if "$BIN" rename snap "" >/dev/null 2>&1; then
+    assert_eq "rename to empty rejected" "rejected" "accepted"
+  else
+    assert_eq "rename to empty rejected" "rejected" "rejected"
+  fi
+  # Name with spaces should fail
+  if "$BIN" rename snap "bad name" >/dev/null 2>&1; then
+    assert_eq "rename to spaces rejected" "rejected" "accepted"
+  else
+    assert_eq "rename to spaces rejected" "rejected" "rejected"
+  fi
+  teardown_tmux
+}
+
+test_load_outside_tmux_bootstraps() {
+  # tx load NAME with no tmux server should bootstrap + create the session.
+  setup_tmux
+  build_session dev
+  "$BIN" save boot-snap -s dev -y >/dev/null 2>&1
+  local before; before="$(panes_descriptor)"
+  tmux kill-server 2>/dev/null
+  unset TMUX
+  "$BIN" load boot-snap >/dev/null 2>&1
+  local after; after="$(panes_descriptor)"
+  assert_eq "tx load bootstraps tmux + restores" "$before" "$after"
+  teardown_tmux
+}
+
+test_tx_name_default_attaches() {
+  # `tx NAME` is NOT a valid shortcut (removed: conflicted with command dispatch).
+  # Verify it reports "unknown command" rather than hanging or misbehaving.
+  setup_tmux
+  build_session dev
+  "$BIN" save named-snap -s dev -y >/dev/null 2>&1
+  unset TMUX
+  local out; out="$("$BIN" named-snap 2>&1 </dev/null)" || true
+  assert_contains "tx NAME reports unknown command" "unknown command" "$out"
+  teardown_tmux
+}
+
+test_index_rebuild_after_corruption() {
+  # P30: the old test was a tautology. This one actually verifies self-heal.
+  setup_tmux
+  build_session dev
+  "$BIN" save heal -s dev -y >/dev/null 2>&1
+  # Corrupt the index
+  printf 'CORRUPT' > "$TX_STORE_DIR/index.json"
+  # store_index_ensure should detect corruption and rebuild
+  "$BIN" ls >/dev/null 2>&1
+  local n; n="$(jq '.snapshots | length' "$TX_STORE_DIR/index.json" 2>/dev/null)"
+  assert_eq "index self-heals after corruption" "1" "$n"
+  teardown_tmux
+}
+
 
 # ============================================================
 # === Runner                                               ===
@@ -571,6 +654,12 @@ main() {
     test_tx_start_outside_tmux_multi_window
     test_install_detects_managed_symlink
     test_fzf_flags_centralized
+    test_help_subcommands_print
+    test_version_not_hardcoded
+    test_rename_rejects_invalid_name
+    test_load_outside_tmux_bootstraps
+    test_tx_name_default_attaches
+    test_index_rebuild_after_corruption
   )
 
   for t in "${tests[@]}"; do

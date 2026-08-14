@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+set -euo pipefail
 # @path: ~/.config/tmux/scripts/tmux-keymaps.sh
 # @author: redskaber
 # @description: keymap cheat-sheet (fzf palette)
@@ -17,6 +18,8 @@ Pane Control        | Ctrl-a  _         | split vertical
 Pane Control        | Ctrl-a  x         | kill pane
 Pane Control        | Ctrl-a  X         | kill window
 Resize              | Ctrl-a  H/J/K/L   | resize pane (repeatable)
+Keymap Cheat-sheet  | Ctrl-a  /         | this fzf popup (friendly view)
+Keymap Native       | Ctrl-a  ?         | tmux list-keys (all bindings)
 Layout Templates    | Ctrl-a  L         | apply static layout (fzf)
 tx · save           | Ctrl-a  S         | snapshot current session (popup)
 tx · load           | Ctrl-a  O         | pick & restore a snapshot (popup)

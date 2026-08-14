@@ -208,26 +208,7 @@ ui_pick_snapshot() {
   esac
 }
 
-# ui_pick_live_session → echo selected session name (empty if cancelled).
-ui_pick_live_session() {
-  command -v fzf >/dev/null 2>&1 || { core_error "fzf not installed"; return 1; }
-  # tmux's -F engine escapes control bytes, so use a printable multi-char
-  # delimiter (~~~) — same approach as snapshot.sh's _TX_TMUX_FS.
-  local fs='~~~'
-  local lines
-  lines="$(core_tmux list-sessions -F "#{session_name}${fs}#{session_windows}${fs}#{session_created}${fs}#{session_attached}" 2>/dev/null \
-    | while IFS="$fs" read -r n w c a; do
-        [[ -z "$n" ]] && continue
-        local att=""; [[ "$a" == "1" ]] && att=" (attached)"
-        printf '%-20s  %sw%s  %s%s\n' "$n" "$(core_c dim)" "$w" "$(date -d "@$c" +%Y-%m-%d_%H:%M 2>/dev/null || echo "?")" "$att"
-      done)"
-  [[ -n "$lines" ]] || { core_warn "no live sessions"; return 1; }
-  local sel
-  sel="$(printf '%s\n' "$lines" | fzf \
-    $(ui_fzf_common_flags) \
-    2>/dev/null)" || return 1
-  echo "$sel" | awk '{print $1}'
-}
+# (ui_pick_live_session removed — dead code, no caller in the codebase.)
 
 # ui_prompt_string <prompt> [default] → echo entered string.
 ui_prompt_string() {

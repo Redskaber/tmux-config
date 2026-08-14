@@ -21,14 +21,12 @@ group_create() {
     core_warn "group already exists: $name"
     return 0
   fi
-  # Insert with description.
+  # Insert with description (reuse store.sh's _atomic_write for consistency).
   local gf; gf="$(core_groups_file)"
   local updated
   updated="$(jq --arg n "$name" --arg d "$desc" --arg at "$(core_now_iso)" \
     '.groups += [{name:$n, description:$d, created_at:$at}]' "$gf")"
-  local dir; dir="$(dirname "$gf")"
-  local tmp; tmp="$(mktemp -p "$dir" .tmp.XXXXXX)"
-  printf '%s' "$updated" > "$tmp"; mv -f "$tmp" "$gf"
+  _atomic_write "$gf" "$updated"
   core_ok "created group: $name"
 }
 

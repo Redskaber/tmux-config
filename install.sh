@@ -81,7 +81,6 @@ manual_install() {
 
   cp -r "$PROJECT_DIR" "$target"
   rm -rf "$TARGET/tests" "$TARGET/install.sh" "$TARGET/.git" 2>/dev/null || true
-  mkdir -p "$TARGET/store/snapshots"
   chmod +x "$TARGET/bin/tx" "$TARGET/scripts/"*.sh "$TARGET/policy/copy/"*.sh 2>/dev/null || true
 
   # Symlink tx onto ~/.local/bin.

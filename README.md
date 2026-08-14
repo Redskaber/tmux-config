@@ -118,21 +118,31 @@ tx doctor                            diagnose environment
 tx info                              system & store info
 ```
 
-### The ergonomic entry point: `tx start`
+### The ergonomic entry point: `tx start` / `tx load`
 
-The single biggest usability win: **start tmux AND restore a snapshot in one command.**
+**No need to start tmux first** — both `tx start` and `tx load` auto-bootstrap
+a tmux server if none is running, restore the snapshot, and attach (in a real
+terminal). If no snapshot name is given, `tx start` picks one interactively
+(or restores the most-recent if fzf/TTY unavailable).
 
 ```bash
-tx start            # outside tmux → bootstraps a server, shows the picker,
-                    #                  restores your selection, attaches
+tx start            # outside tmux → bootstrap server, pick a snapshot, restore + attach
+                    # inside tmux  → picker → switch-client to restored session
+                    # no fzf/TTY   → restore most-recent snapshot automatically
 tx start myproj     # outside tmux → bootstrap + restore 'myproj' + attach
-tx start            # inside tmux  → picker → switch-client to the restored session
+                    # inside tmux  → restore 'myproj' + switch-client
+tx load myproj      # same as 'tx start myproj' (bootstrap if no server, attach if outside)
+tx load myproj -r   # replace existing session of the same name
 ```
 
-Performance: `tx start` is **on-demand only** — it never auto-runs when tmux
-starts (avoids adding latency to every `tmux` invocation). The picker reads
-the cached index (microsecond cost). `tx last` is even cheaper — no picker,
-just restore the newest snapshot (bound to `Ctrl-a C-t` for one-key resume).
+**`tx start` vs `tx load`**: `tx start` defaults to `--replace` (overwrites
+existing session); `tx load` defaults to no-replace (appends `-restored-N` if
+the session name exists). Both auto-attach when run from a real terminal
+outside tmux.
+
+Performance: on-demand only — never auto-runs when tmux starts. The picker
+reads the cached index (microsecond cost). `tx last` is even cheaper — no
+picker, just restore the newest (bound to `Ctrl-a C-t`).
 
 ### Examples
 
@@ -171,7 +181,8 @@ tx diff v1 v2
 | `Ctrl-a Ctrl-o`   | quick auto-named save (background)              |
 | `Ctrl-a Ctrl-t`   | **one-key resume** — restore most-recent snapshot |
 | `Ctrl-a L`        | apply a *static* layout template (fzf)          |
-| `Ctrl-a ?`        | keymap cheat-sheet                              |
+| `Ctrl-a /`        | keymap cheat-sheet (fzf popup)                  |
+| `Ctrl-a ?`        | tmux native `list-keys` (all bindings)          |
 
 From outside tmux, use **`tx start`** (or `tx start NAME`) as the entry point.
 
@@ -208,7 +219,7 @@ From outside tmux, use **`tx start`** (or `tx start NAME`) as the entry point.
 - **Single source of truth** — one fzf-style helper (`ui_fzf_common_flags`),
   one index-numbering resolver (`core_tmux_base_index`), one PATH-wiring path
   per deployment context.
-- **Tested** — 63 integration tests assert a save → kill → load round-trip
+- **Tested** — 71 integration tests assert a save → kill → load round-trip
   reproduces the *exact* pane structure (indices, cwds, active states, geometry).
 
 ---
@@ -235,7 +246,7 @@ tmux-config/
 │   ├── tmux-layouts.sh        # static layout dispatcher (fzf → apply)
 │   └── tmux-tx-save.sh        # popup helper for `prefix S`
 ├── tests/
-│   └── run.sh                 # integration test suite (63 assertions)
+│   └── run.sh                 # integration test suite (71 assertions)
 ├── install.sh                 # auto-detects managed vs manual install
 ├── LICENSE
 └── README.md
@@ -403,6 +414,47 @@ and verifies:
 ---
 
 ## Changelog
+
+### v2.0.0 — architecture refactor (P0-P15 fixes)
+
+- **P1 fix (critical)**: `exec core_tmux attach` → `exec tmux attach`. The `exec`
+  builtin cannot call shell functions — this was a fatal bug on `tx load` outside tmux.
+- **P2 fix (critical)**: `--attach` logic was inverted (passing `--attach` SUPPRESSED
+  attach). Rewritten with clear semantics: inside tmux → switch-client; outside + TTY →
+  exec attach; outside + no TTY → detached with hint.
+- **P4 fix**: removed dead `-y/--yes` flag from `tx save` (was a no-op variable).
+- **P7 fix**: `tx_usage` no longer hardcodes `v1.1.0` — uses `$TX_VERSION`.
+- **P8 fix**: all subcommand `-h` now print real help via `_print_help` helper
+  (was: empty `return 0` or fragile `sed` slicing).
+- **P9/P11/P12**: removed dead code (`_check` in doctor, `ui_pick_live_session`,
+  `core_iso_to_epoch`, `core_config_get`, `core_jq_escape`).
+- **P13 fix**: `store_update` no longer bypasses name validation (`|| true` removed).
+- **P14 fix**: `store_index_rebuild` is now O(n) (one `jq -s`) instead of O(n²).
+- **P15 fix**: `_atomic_write` cleans up temp file on failure.
+- **P16 fix**: `group_create` reuses `_atomic_write` instead of duplicating the pattern.
+- **P27 fix**: `install.sh` no longer creates an unused `$TARGET/store/snapshots` dir.
+- **P28 fix**: `scripts/tmux-keymaps.sh` now has `set -euo pipefail`.
+- **`-a` disambiguation**: `tx load` now uses `-A/--attach` (was `-a`, conflicting with
+  `tx save -a/--all`).
+- **`tx NAME` shortcut removed**: conflicted with command dispatch (`tx myproj` →
+  "unknown command"). Use `tx load myproj` or `tx start myproj`.
+- **`tx last` always attaches** (was: only inside tmux) — "resume work" semantics.
+- **Test suite**: 61 → **71 tests**. Added coverage for: subcommand `-h`, version
+  not hardcoded, rename validation, load-outside-tmux bootstrap, index self-heal
+  (replaced tautology test), `tx NAME` dispatch.
+
+### v1.5.0 — ergonomic start/load (no tmux needed first)
+
+- **`tx load` now bootstraps + auto-attaches**: if no tmux server is running,
+  `tx load NAME` creates one, restores the snapshot, and attaches (in a real
+  terminal). No more "start tmux first" requirement.
+- **`tx start` simplified**: `tx start NAME` delegates to `tx load NAME --replace --attach`.
+  `tx start` (no name) picks interactively, or falls back to the most-recent
+  snapshot if fzf/TTY unavailable (was: "cancelled" in non-interactive contexts).
+- **`tx start` defaults to `--replace`**; `tx load` defaults to no-replace.
+- **TTY-aware attach**: in non-interactive contexts (scripts, CI), the session
+  is left detached with a hint instead of failing on `tmux attach`.
+- **`Ctrl-a /` for cheat-sheet** (v1.4.2): preserved tmux native `?` (list-keys).
 
 ### v1.4.0 — pure config repo (Nix code removed)
 
