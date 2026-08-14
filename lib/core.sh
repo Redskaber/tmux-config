@@ -15,7 +15,7 @@ _TX_CORE_LOADED=1
 # === Constants                                            ===
 # ============================================================
 
-readonly TX_VERSION="1.3.1"
+readonly TX_VERSION="1.4.0"
 readonly TX_AUTHOR="redskaber"
 readonly TX_SCHEMA_SNAPSHOT="tx.snapshot.v1"
 readonly TX_SCHEMA_INDEX="tx.index.v1"

@@ -30,53 +30,11 @@ and reconfigure windows one by one.
 
 ## Install
 
-### Option A — NixOS / home-manager (declarative, recommended)
+This is a **pure tmux config repo** — no Nix code lives here. It contains
+`tmux.conf`, the `tx` CLI, and supporting scripts. How `tx` gets onto PATH
+depends on your platform (manual symlink, or NixOS `home.sessionPath`).
 
-Add this repo as a flake input and import the home-manager module. The module
-adds `tx` to PATH for **all shells** via `home.sessionPath` — no rc-file editing.
-
-```nix
-# flake.nix
-inputs.tmux-config.url = "github:redskaber/tmux-config";
-
-# home config (e.g. home/core/exp/sys/base/tmux.nix)
-{ inputs, config, ... }: {
-  imports = [ inputs.tmux-config.homeModules.tx-home ];
-  programs.tx.enable = true;   # adds ~/.config/tmux/bin to PATH (all shells)
-
-  xdg.configFile."tmux" = {    # deploy the config files
-    source = inputs.tmux-config;
-    recursive = true;
-    force = true;
-  };
-}
-```
-
-Then:
-
-```bash
-nix flake update tmux-config    # lock the latest revision (MUST have homeModules output)
-home-manager switch --flake .#kilig@nixos
-exec $SHELL
-tx doctor
-```
-
-> **Troubleshooting `attribute 'homeModules' missing`:** this means your
-> `flake.lock` points to an older revision of tmux-config that predates the
-> `homeModules` output. Run `nix flake update tmux-config` to re-lock to the
-> latest, then `home-manager switch` again.
-
-**Or**, without the module — add one line to your existing home config:
-
-```nix
-home.sessionPath = [ "${config.xdg.configHome}/tmux/bin" ];
-```
-
-> `install.sh` **auto-detects** this context: if `~/.config/tmux` is a symlink
-> (home-manager-managed), it prints the snippet above instead of clobbering
-> the symlink.
-
-### Option B — manual install (any Linux/macOS)
+### Manual install (any Linux/macOS)
 
 ```bash
 ./install.sh                       # → ~/.config/tmux, links tx to ~/.local/bin
@@ -92,6 +50,39 @@ tx start                           # ← ergonomic entry: pick a snapshot to res
 # or start tmux normally and use bindings inside:
 tmux                               # Ctrl-a S (save), Ctrl-a O (load), Ctrl-a Ctrl-t (resume)
 ```
+
+> `install.sh` **auto-detects** declaratively-managed configs: if
+> `~/.config/tmux` is a symlink (home-manager / stow / similar), it prints a
+> PATH hint instead of clobbering the symlink.
+
+### NixOS / home-manager integration
+
+Since this repo is a pure config library (declared with `flake = false`),
+the Nix side — deploying the files and putting `tx` on PATH — is handled by
+**your** home-manager config, not by this repo. A minimal `tmux.nix`:
+
+```nix
+# flake.nix
+inputs.tmux-config.url = "github:redskaber/tmux-config";
+inputs.tmux-config.flake = false;   # pure source tree, not a flake
+
+# home/core/exp/sys/base/tmux.nix
+{ inputs, config, ... }: {
+  programs.tmux.enable = true;
+
+  # Deploy the config files to ~/.config/tmux
+  xdg.configFile."tmux" = {
+    source = inputs.tmux-config;
+    recursive = true;
+    force = true;
+  };
+
+  # Put tx on PATH for ALL shells (zsh, fish, bash) — the Nix side's job
+  home.sessionPath = [ "${config.xdg.configHome}/tmux/bin" ];
+}
+```
+
+Then `nix flake update tmux-config && home-manager switch && exec $SHELL && tx doctor`.
 
 ### Dependencies
 
@@ -227,9 +218,6 @@ From outside tmux, use **`tx start`** (or `tx start NAME`) as the entry point.
 ```
 tmux-config/
 ├── tmux.conf                  # core settings + keybindings (wires tx)
-├── flake.nix                  # flake wrapper (exposes homeModules.tx-home)
-├── nix/
-│   └── tx-home.nix            # home-manager module (programs.tx → PATH wiring)
 ├── bin/
 │   └── tx                     # CLI entrypoint (the organization manager)
 ├── lib/
@@ -416,21 +404,44 @@ and verifies:
 
 ## Changelog
 
+### v1.4.0 — pure config repo (Nix code removed)
+
+- **Architecture correction**: `tmux-config` is now a **pure tmux config
+  library** — no Nix code lives here. Removed `flake.nix` and `nix/tx-home.nix`.
+- **Separation of concerns**: the Nix side (deploying files + putting `tx` on
+  PATH) is the responsibility of the consumer's `nix-config`, not this repo.
+  README now shows a minimal `tmux.nix` using `xdg.configFile` + `home.sessionPath`.
+- **`install.sh`** simplified: removed Nix module snippets; keeps the general
+  "symlink → declaratively managed → print hint" detection (works for home-manager,
+  stow, etc.).
+- **Tests**: removed `test_nix_module_exists` (no Nix module to test). The bash
+  test suite now validates the pure tmux-config library only. Nix integration is
+  verified separately by simulating a consumer flake.
+- Test suite: **62 tests** (was 63; removed the Nix-module existence check).
+
+### v1.3.2 — fix `flake = false` deployment (the actual user bug)
+
+- **Root cause found**: the user's `flake.nix` declares `tmux-config.flake = false`
+  (the standard pattern for config repos — same as `starship-config`, `kitty-config`,
+  etc.). With `flake = false`, Nix treats `inputs.tmux-config` as a **source path**,
+  NOT a flake — so `inputs.tmux-config.homeModules` doesn't exist
+  (`attribute 'homeModules' missing`).
+- **Fix**: documented two loading patterns — **A1** (`flake = false` + `import`)
+  and **A2** (`flake = true` + `homeModules`). A1 is recommended for consistency
+  with other config repos. The module file `nix/tx-home.nix` is loadable both ways.
+- **Verified** with a consumer flake using `flake = false`:
+  `import "${inputs.tmux-config}/nix/tx-home.nix"` produces a valid module function;
+  `homeModules` correctly absent under `flake = false`.
+- **install.sh** snippet updated to show both patterns.
+- **README** rewritten install section with A1/A2 + troubleshooting.
+
 ### v1.3.1 — flake module fix
 
-- **flake.nix robustness** — removed `self.homeModules` self-reference (could
-  cause lazy-eval issues in some Nix versions); the module is now bound to a
-  `let` variable and referenced directly by both `homeModules.tx-home` and
-  `homeModules.default`.
-- **Module cleanup** — `nix/tx-home.nix` removed redundant `or {}` fallback on
-  `config.programs.tx` (the module defines the option itself), added
-  `defaultText` to options for better `mkEnableOption` docs, consolidated
-  `home.sessionVariables` into a single attrset.
-- **Verified end-to-end with Nix 2.30** — `nix flake show` confirms
-  `homeModules` is present; a consumer flake confirms `homeModules.tx-home` is
-  a valid module function; the module evaluates correctly with mock args.
-- **README** — added troubleshooting note for `attribute 'homeModules' missing`
-  (caused by a stale flake.lock pointing to a pre-module revision).
+- **flake.nix robustness** — removed `self.homeModules` self-reference; module
+  bound to a `let` variable.
+- **Module cleanup** — `nix/tx-home.nix` removed redundant `or {}`, added
+  `defaultText`, consolidated `home.sessionVariables`.
+- **Verified end-to-end with Nix 2.30**.
 
 ### v1.3.0 — NixOS/home-manager support + fzf theme alignment
 

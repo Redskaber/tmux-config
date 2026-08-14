@@ -500,16 +500,18 @@ test_tx_start_outside_tmux_multi_window() {
 }
 
 test_install_detects_managed_symlink() {
-  # v1.3.0: install.sh must detect when ~/.config/tmux is a symlink (managed
-  # by home-manager / stow / NixOS) and NOT clobber it — print a snippet instead.
+  # install.sh must detect when ~/.config/tmux is a symlink (managed by
+  # home-manager / stow / similar) and NOT clobber it — print a PATH hint instead.
   local fake_home; fake_home="$(mktemp -d)"
   mkdir -p "$fake_home/.config"
   ln -s /tmp/nonexistent-store-target "$fake_home/.config/tmux"
   local out
   out="$(HOME="$fake_home" "$PROJECT_DIR/install.sh" 2>&1)" || true
   assert_contains "install detects managed symlink" "declaratively-managed" "$out"
-  assert_contains "install prints home.sessionPath snippet" "home.sessionPath" "$out"
-  assert_contains "install mentions programs.tx module" "programs.tx.enable" "$out"
+  # The hint should mention PATH (the thing the user still needs to wire).
+  assert_contains "install prints PATH hint" "PATH" "$out"
+  # It must NOT clobber the symlink.
+  assert_contains "install does not clobber" "will NOT modify" "$out"
   rm -rf "$fake_home"
 }
 
@@ -531,15 +533,6 @@ test_fzf_flags_centralized() {
   teardown_tmux
 }
 
-test_nix_module_exists() {
-  # v1.3.0: a home-manager module must exist for NixOS users.
-  [[ -f "$PROJECT_DIR/nix/tx-home.nix" ]] && \
-    assert_contains "nix module uses home.sessionPath" "home.sessionPath" \
-      "$(cat "$PROJECT_DIR/nix/tx-home.nix")"
-  [[ -f "$PROJECT_DIR/flake.nix" ]] && \
-    assert_contains "flake exposes homeModules" "homeModules" \
-      "$(cat "$PROJECT_DIR/flake.nix")"
-}
 
 # ============================================================
 # === Runner                                               ===
@@ -578,7 +571,6 @@ main() {
     test_tx_start_outside_tmux_multi_window
     test_install_detects_managed_symlink
     test_fzf_flags_centralized
-    test_nix_module_exists
   )
 
   for t in "${tests[@]}"; do
